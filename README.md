@@ -4,7 +4,6 @@ LodeRunnerSharp
 Bot for loderunner game
 
 Authors:
-Nikolas Anikienko,
+Nicolas Anykienko,
 Alexey Gora,
 Alex Vishnevski.
-
