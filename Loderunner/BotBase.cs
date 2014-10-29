@@ -14,12 +14,25 @@ namespace Loderunner
         protected const string UP = "UP";
         protected const string DOWN = "DOWN";
 
-        protected int MAX_TARGET_GOLDS = 15;
+        protected int MAX_TARGET_GOLDS = 5;
 
-        protected static char[] HeroChars = new[] { '►', '◄', 'Я', 'R', 'Y' , '[', ']', '{', '}', deadHero };
-        protected const char deadHero = 'Ѡ';
+        #region board description constants
+        protected static readonly char[] HeroChars = new[] { HeroStandsLeft, HeroStandsRight, HeroDrillLeft, HeroDrillRight, HeroOnLadder, '[', ']', HeroOnPipeLeft, HeroOnPipeRight, HeroDead };
+        protected static readonly char[] HeroOnPipe = new[] { HeroOnPipeLeft, HeroOnPipeRight };
+        protected static readonly char[] HeroStands = new[] { HeroStandsLeft, HeroStandsRight };
+        protected static readonly char[] HeroDrill = new[] { HeroDrillLeft, HeroDrillRight };
+        protected static readonly char[] EnemyChars = new[] { 'Q', '«', '»', '<', '>', 'X' };
 
-        protected const char GoldChar = '$';
+        protected const char HeroOnPipeLeft = '{';
+        protected const char HeroOnPipeRight = '}';
+        protected const char HeroStandsLeft = '◄';
+        protected const char HeroStandsRight = '►';
+        protected const char HeroDrillLeft = 'Я';
+        protected const char HeroDrillRight = 'R';
+        protected const char HeroOnLadder = 'Y';
+        protected const char HeroDead = 'Ѡ';
+
+        protected const char Gold = '$';
         protected const char Wall = '☼';
         protected const char Brick = '#';
         protected const char Ladder = 'H';
@@ -27,85 +40,155 @@ namespace Loderunner
 
         protected const char DrillSpace = '.';
         protected const char DrillPit = '*';
-        protected static char[] PitFill = new[] { '1', '2', '3', '4' };
+        protected const char Space = ' ';
+        protected static readonly char[] PitFill = new[] { '1', '2', '3', '4' }; 
+        #endregion
         
         protected char[,] _board = new char[0, 0];
 
-        protected Tuple<Point, char> me;
-             
-        protected List<Step> currentRoute;
-
+        private Tuple<Point, char> _me;             
+        private List<Step> _route;
+        private Point? _heroNextExpectedPoint;
+        private string _lastCommand;
+        
         public void SetBoard(char[,] board) 
         {
-            _board = board;
-            me = Search((c) => 
+            if (board == null)
             {
-                return HeroChars.Contains(c);
-            });
-            if (me == null)
-            {
-                throw new Exception("Hero pos is null");
+                throw new ArgumentNullException("board");
             }
+            _board = board;
+        }
 
-            var allGolds = SearchAll((c) =>
+        public Point GetHeroPosition()
+        {
+            if (_me!=null)
             {
-                return c == GoldChar;
-            }).OrderBy(c => 
-            {
-                return GetDistance(c.Item1,me.Item1);
-            }).Select(c=>c.Item1)
-              .ToList();
-            
-            currentRoute = EvaluateBestRoute(allGolds.Take(MAX_TARGET_GOLDS).ToList());
-
-            if (currentRoute != null)
-            {
-
-
-                StringBuilder sb = new StringBuilder();
-
-                sb.AppendLine(string.Format("Target: {0}, ({1},{2})", currentRoute.Last().Info.ExpectedChar, currentRoute.Last().Point.X, currentRoute.Last().Point.Y));
-
-                foreach (var x in currentRoute)
-                {
-                    sb.AppendLine(string.Format("Command: {0}, ExpChar: {1}", string.Join("|", x.Info.Command), x.Info.ExpectedChar));
-                }
-
-                sb.AppendLine("-------------------------------");
-
-                System.Diagnostics.Debug.Write(sb.ToString());
+                return _me.Item1;
             }
             else
             {
-                currentRoute = EvaluateBestRoute(allGolds.Skip(MAX_TARGET_GOLDS).ToList());
+                return new Point(-1,-1);
             }
-            
         }
 
-        public string NextCommand()
+        public virtual string NextCommand(StringBuilder log)
         {
-            if (currentRoute != null)
-            {
-                var step = currentRoute.FirstOrDefault();
-                if (step != null)
-                {
-                    
-                    var cmd = step.Info.Command.First();
-                    step.Info.Command.Remove(cmd);
-                    if (!step.Info.Command.Any())
-                    {
-                        currentRoute.Remove(step);
-                    }
+            BuildRoute(log);            
 
-                    return cmd;                    
+            // TODO: refactor, too complicated...
+            if (_route != null)
+            {
+                var step = _route.First();
+
+                var cmd = step.Info.Command.First();
+                step.Info.Command.RemoveAt(0);
+                if (!step.Info.Command.Any())
+                {
+                    _route.RemoveAt(0);
+                    _heroNextExpectedPoint = step.Point;
+                    _lastCommand = cmd;
                 }
                 else
                 {
-                    currentRoute = null; // route is completed
+                    _heroNextExpectedPoint = null;
                 }
+
+                if (!_route.Any())
+                {
+                    _route = null; // route is completed
+                }
+
+                return cmd; 
             }
 
             return string.Empty;
+        }
+
+        protected void BuildRoute(StringBuilder log)
+        {
+            _me = Search(c => HeroChars.Contains(c));
+            
+            if (_me == null) //WTF!??
+            {
+                _route = null;
+                log.AppendLine("Hero not found");
+                return;
+            }
+
+            if (_me.Item2 == HeroDead)
+            {
+                log.AppendLine("Hero is dead ... Ѡ ...");
+                _route = null;
+                return;
+            }
+
+            // reset route if previous command is not moved hero to next expected point
+            if (_heroNextExpectedPoint!=null && _heroNextExpectedPoint!=_me.Item1)
+            {
+                log.AppendLine(string.Format("Command '{0}' failed. Expected Pos {1}. Actual Pos {2}", _lastCommand, _heroNextExpectedPoint.Value, _me.Item1));
+                _route = null;
+            }
+
+            if (_route!=null)
+            {
+                // reset route if someone stolen the gold
+                var target = _route.Last();
+                if (target.Info.ExpectedChar != _board[target.Point.X, target.Point.Y])
+                {
+                    log.AppendLine("Gold was stolen");
+                    _route = null;
+                }
+                else
+                {
+                    // reset route if enemy is on the route near (5 steps)
+                    foreach(var point in _route.Take(5))
+                    {
+                        if (EnemyChars.Contains(_board[point.Point.X, point.Point.Y]))
+                        {
+                            log.AppendLine("Enemy is near");
+                            _route = null;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (_route==null)
+            {
+                log.AppendLine("Evaluate new route...");
+                var allGolds = SearchAll((c) => c == Gold)
+                  .OrderBy(c => GetDistance(c.Item1,_me.Item1))
+                  .Select(c=>c.Item1)
+                  .ToList();            
+            
+                // evaluate route to near gold
+                _route = EvaluateBestRoute(allGolds.Take(MAX_TARGET_GOLDS).ToList());
+                if (_route!=null)
+                {
+                    log.AppendLine("Route is found for near point");                
+                }
+
+                if (_route == null)
+                {
+                    // if can't find route to near - try all other golds (may be slow)
+                    _route = EvaluateBestRoute(allGolds.Skip(MAX_TARGET_GOLDS).ToList());
+                    if (_route!=null)
+                    {
+                        log.AppendLine("Route is found for far point");  
+                    }
+                }
+            }
+            
+            if (_route !=null)
+            {
+                var target = _route.Last();
+                log.AppendLine(string.Format("Target: {0}, ({1}) Steps: {2}", target.Info.ExpectedChar, target.Point.ToString(), _route.Count));
+                foreach (var x in _route)
+                {
+                    log.AppendLine(string.Format("Command: {0}, ExpChar: {1}", string.Join("|", x.Info.Command), x.Info.ExpectedChar));
+                }
+            }
         }
 
         protected Tuple<Point, char> Search(Func<char,bool> whatToSearch)
@@ -140,15 +223,29 @@ namespace Loderunner
             }
         }
         
-        protected bool CanRight(Point from, char fromChar, out string command) 
+        protected bool CanLocatedOn(char c)
         {
-            var rightItem = _board[from.X + 1, from.Y];
-            var bottomItem = _board[from.X, from.Y + 1];
+            return c == Space || c == Pipe || c == Gold || c == Ladder || c == DrillSpace || c == DrillPit;
+        }
+
+        protected bool IsGround(char c)
+        {
+            return c == Wall || c == Brick || c == Ladder;
+        }
+
+        protected bool IsAnchorOrOnTheGround(char c, char bottomChar)
+        {
+            return c==Pipe || c==Ladder || c==HeroOnLadder || HeroOnPipe.Contains(c) || HeroStands.Contains(c) || HeroDrill.Contains(c)
+                   || 
+                   IsGround(bottomChar);
+        }
+
+        protected internal bool CanRight(Point from, char fromChar, out string command) 
+        {
+            var rightChar = _board[from.X + 1, from.Y];
+            var bottomChar = _board[from.X, from.Y + 1];
             
-            if (
-                ((bottomItem == Wall || bottomItem == Brick || bottomItem == GoldChar || fromChar == Pipe || fromChar == Ladder || HeroChars.Contains(fromChar)) && (rightItem == ' ' || rightItem == Ladder || rightItem == Pipe || rightItem == GoldChar)
-                )
-                )
+            if (CanLocatedOn(rightChar) && IsAnchorOrOnTheGround(fromChar, bottomChar))
             {
                 command = RIGHT;
                 return true;
@@ -158,12 +255,12 @@ namespace Loderunner
             return false;
         }
 
-        protected bool CanLeft(Point from, char fromChar, out string command)
+        protected internal bool CanLeft(Point from, char fromChar, out string command)
         {
-            var leftItem = _board[from.X - 1, from.Y];
-            var bottomItem = _board[from.X, from.Y + 1];
-
-            if ((bottomItem == Wall || bottomItem == Brick || bottomItem == GoldChar || fromChar == Pipe || fromChar == Ladder || HeroChars.Contains(fromChar)) && (leftItem == ' ' || leftItem == Ladder || leftItem == Pipe || leftItem == GoldChar))
+            var leftChar = _board[from.X - 1, from.Y];
+            var bottomChar = _board[from.X, from.Y + 1];
+            
+            if (CanLocatedOn(leftChar) && IsAnchorOrOnTheGround(fromChar, bottomChar))
             {
                 command = LEFT;
                 return true;
@@ -173,10 +270,10 @@ namespace Loderunner
             return false;
         }
 
-        protected bool CanUp(Point from, char fromChar, out string command)
+        protected internal bool CanUp(Point from, char fromChar, out string command)
         {
             var upItem = _board[from.X, from.Y - 1];
-            if ((upItem == Ladder && ((fromChar=='Y') || fromChar==Ladder)) && (upItem == Ladder || upItem == GoldChar || upItem == ' ' || upItem == Pipe))
+            if (CanLocatedOn(upItem) && ((fromChar=='Y') || fromChar==Ladder))
             {
                 command = UP;
                 return true;
@@ -186,10 +283,10 @@ namespace Loderunner
             return false;
         }
 
-        protected bool CanDown(Point from, out string command)
+        protected internal bool CanDown(Point from, out string command)
         {
             var downItem = _board[from.X, from.Y + 1];
-            if (downItem == Ladder || downItem == ' ' || downItem == GoldChar || downItem == Pipe)
+            if (CanLocatedOn(downItem))
             {
                 command = DOWN;
                 return true;
@@ -199,12 +296,14 @@ namespace Loderunner
             return false;
         }
 
-        protected bool CanRightDown(Point from, char fromChar, out string[] command)
+        protected internal bool CanRightDown(Point from, char fromChar, out string[] command)
         {
-            var rightDownItem = _board[from.X + 1, from.Y + 1];
-            var rightItem = _board[from.X + 1, from.Y];
+            var rightDownChar = _board[from.X + 1, from.Y + 1];
+            var rightChar = _board[from.X + 1, from.Y];
+            var bottomChar = _board[from.X, from.Y+1];
+
             string cmd;
-            if (CanRight(from, fromChar, out cmd) && fromChar != Pipe && rightDownItem == Brick && (rightItem == ' ' || rightItem == GoldChar))
+            if ((fromChar == ' ' || fromChar == Gold || HeroStands.Contains(fromChar)) && IsGround(bottomChar) && rightDownChar == Brick && (rightChar == ' ' || rightChar == Gold))
             {
                 command = new string[] { "ACT," + RIGHT, RIGHT, DOWN };
                 return true;
@@ -214,12 +313,14 @@ namespace Loderunner
             return false;
         }
 
-        protected bool CanLeftDown(Point from, char fromChar, out string[] command)
+        protected internal bool CanLeftDown(Point from, char fromChar, out string[] command)
         {
-            var leftDownItem = _board[from.X - 1, from.Y + 1];
-            var rightItem = _board[from.X - 1, from.Y];
+            var leftDownChar = _board[from.X - 1, from.Y + 1];
+            var leftChar = _board[from.X - 1, from.Y];
+            var bottomChar = _board[from.X, from.Y + 1];
+
             string cmd;
-            if (CanLeft(from, fromChar, out cmd) && fromChar != Pipe && leftDownItem == Brick && (rightItem == ' ' || rightItem == GoldChar))
+            if ((fromChar == ' ' || fromChar == Gold || HeroStands.Contains(fromChar)) && IsGround(bottomChar) && leftDownChar == Brick && (leftChar == ' ' || leftChar == Gold))
             {
                 command = new string[] { "ACT," + LEFT, LEFT, DOWN };
                 return true;
@@ -254,55 +355,93 @@ namespace Loderunner
             List<List<Step>> routesToTarget = new List<List<Step>>();
             foreach (var target in targets)
             {
-                var route = EvaluateRouteTo(target);
+                var route = EvaluateBestRouteTo(target);
                 if (route != null)
                 {
                     routesToTarget.Add(route);
                 }
             }
 
-            var shortestRoute = routesToTarget.OrderBy(route=>route.Count).FirstOrDefault();
+            var shortestRoute = routesToTarget.OrderBy(route=>route.SelectMany(x=>x.Info.Command).Count()).FirstOrDefault();
             return shortestRoute;
         }
 
-        protected List<Step> EvaluateRouteTo(Point target)
+        protected List<Step> EvaluateBestRouteTo(Point target)
         {
             var rootNode = new GraphNode();
-            rootNode.Pos = me.Item1;
+            rootNode.Pos = _me.Item1;
             rootNode.DistanceToTarget = GetDistance(rootNode.Pos, target);
-            rootNode.Info = new StepInfo() { ExpectedChar = _board[me.Item1.X, me.Item1.Y] };
+            rootNode.Info = new StepInfo() { ExpectedChar = _board[_me.Item1.X, _me.Item1.Y] };
 
-            List<Step> bestRouteReversed = new List<Step>();
+            SearchTargetRecursive(rootNode, target, new HashSet<Point>());
 
-            bool routeFound = rrr(rootNode, target, new HashSet<Point>(), bestRouteReversed);
-
-            if (routeFound)
+            List<Step> outRoute = new List<Step>();
+            if (rootNode.RouteFound)
             {
-                bestRouteReversed.Reverse();
-                return bestRouteReversed;
+                GetShortestRoute(rootNode, target, outRoute);
+                outRoute.Reverse();
+                return outRoute.Skip(1).ToList();
             }
+
             return null;
         }
 
-
-
-        protected bool rrr(GraphNode prevNode, Point target, HashSet<Point> visitedPoints, List<Step> bestRouteReversed)
+        /// <summary>
+        /// Traverse tree until fisrt endpoint found 
+        /// </summary>
+        /// <param name="node"></param>
+        /// <param name="target"></param>
+        /// <param name="outListReversed"></param>
+        /// <returns></returns>
+        private bool GetShortestRoute(GraphNode node, Point target, List<Step> outListReversed)
         {
-            if (prevNode.Pos == target) return true;
+            if (node.Pos==target)
+            {
+                outListReversed.Add(new Step() {Point=node.Pos, Info = node.Info});
+                return true;
+            }
 
-            Point prevPoint = prevNode.Pos;
-            
+            foreach(var n in node.Tree.Where(s=>s.RouteFound))
+            {
+                if (GetShortestRoute(n, target, outListReversed))
+                {
+                    outListReversed.Add(new Step() {Point=node.Pos, Info = node.Info});
+                    return true;
+                }
+            }
+
+            return false;
+        }
+        
+        protected bool SearchTargetRecursive(GraphNode prevNode, Point target, HashSet<Point> visitedPoints)
+        {
+            if (prevNode.Pos == target) 
+            {
+                prevNode.RouteFound = true;
+                return true;
+            }
+
+            Point prevPoint = prevNode.Pos;            
             visitedPoints.Add(prevPoint);
 
-
             Point p;
-
             string command;
             string[] commands;
-            p = GetRightPoint(prevPoint);
 
+            p = GetUpPoint(prevPoint);
+            if (!visitedPoints.Contains(p) && CanUp(prevPoint, prevNode.Info.ExpectedChar, out command))
+            {
+                var node = new GraphNode();
+                node.Pos = p;
+                node.DistanceToTarget = GetDistance(node.Pos, target);
+                node.Info = new StepInfo();
+                node.Info.Command = new[] { command }.ToList();
+                node.Info.ExpectedChar = _board[node.Pos.X, node.Pos.Y];
 
+                prevNode.Tree.Add(node);
+            }
 
+            p = GetRightPoint(prevPoint);            
             if (!visitedPoints.Contains(p) && CanRight(prevPoint, prevNode.Info.ExpectedChar, out command))
             {
                 var node = new GraphNode();
@@ -316,7 +455,6 @@ namespace Loderunner
             }
 
             p = GetLeftPoint(prevPoint);
-
             if (!visitedPoints.Contains(p) && CanLeft(prevPoint, prevNode.Info.ExpectedChar, out command))
             {
                 var node = new GraphNode();
@@ -328,21 +466,7 @@ namespace Loderunner
 
                 prevNode.Tree.Add(node);
             }
-
-            p = GetUpPoint(prevPoint);
-
-            if (!visitedPoints.Contains(p) && CanUp(prevPoint, prevNode.Info.ExpectedChar, out command))
-            {
-                var node = new GraphNode();
-                node.Pos = p;
-                node.DistanceToTarget = GetDistance(node.Pos, target);
-                node.Info = new StepInfo();
-                node.Info.Command = new[] { command }.ToList();
-                node.Info.ExpectedChar = _board[node.Pos.X, node.Pos.Y];
-
-                prevNode.Tree.Add(node);
-            }
-
+            
             p = GetDownPoint(prevPoint);
             if (!visitedPoints.Contains(p) && CanDown(prevPoint, out command))
             {
@@ -384,23 +508,13 @@ namespace Loderunner
                 prevNode.Tree.Add(node);
             }
 
-            if (prevNode.Tree.Count == 0)
-            {
-                //visitedPoints.Clear();
-                //rrr(prevNode,target,visitedPoints,bestRouteReversed);
-            }
-
             var routeFound = false;
-            foreach(var node in prevNode.Tree.OrderBy((x) => x.DistanceToTarget))
+            foreach(var node in prevNode.Tree.OrderBy(x => x.Info.Command.Count + x.DistanceToTarget))
             {
-                routeFound|= rrr(node,target,visitedPoints, bestRouteReversed);
-
-                if (routeFound)
-                {
-                    bestRouteReversed.Add(new Step() { Point = node.Pos, Info = node.Info });
-                    break;
-                }
+                routeFound |= SearchTargetRecursive(node,target, visitedPoints);
             }
+
+            prevNode.RouteFound = routeFound;
 
             return routeFound;
         }
@@ -417,7 +531,7 @@ namespace Loderunner
         public Point Pos;
         public int DistanceToTarget;
         public List<GraphNode> Tree = new List<GraphNode>(); // max three nodes
-        public bool BestRoute;
+        public bool RouteFound;
     }
 
     public class Step
